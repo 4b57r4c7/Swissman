@@ -5,6 +5,6 @@
 
 name="${1:?usage: pack-stage.sh <name>}"
 mkdir -p "$REPO_ROOT/out"
-tar -C "$LFS" -cf - . | zstd -T0 -10 -o "$REPO_ROOT/out/$name.tar.zst"
+tar --numeric-owner -C "$LFS" -cf - . | zstd -T0 -10 -o "$REPO_ROOT/out/$name.tar.zst"
 ( cd "$REPO_ROOT/out" && sha256sum "$name.tar.zst" > "$name.tar.zst.sha256" )
 log "Packed $(du -h "$REPO_ROOT/out/$name.tar.zst" | cut -f1) into out/$name.tar.zst"
