@@ -42,16 +42,33 @@ src_patch() {
   [ "${3:-}" = optional ] || die "missing patch $1 $2"
 }
 
-# Extract a package into a fresh work directory and cd into it.
-# The caller runs in a subshell, so the cd does not leak.
+# Print the single source file matching a glob, e.g. `src_glob 'tcl*-src.tar.gz'`.
+src_glob() {
+  local matches
+  mapfile -t matches < <(compgen -G "$SOURCES/$1" || true)
+  [ "${#matches[@]}" -eq 1 ] || die "expected one file for '$1', found ${#matches[@]}"
+  printf '%s\n' "${matches[0]}"
+}
+
+# Extract a package into a fresh work directory and cd into it. The
+# optional second argument is a glob for packages whose tarball name does
+# not follow <name>-<version>. The caller runs in a subshell, so the cd
+# does not leak.
 enter_src() {
   local name="$1" tarball dir
-  tarball="$(src_tarball "$name")"
+  if [ -n "${2:-}" ]; then
+    tarball="$(src_glob "$2")"
+  else
+    tarball="$(src_tarball "$name")"
+  fi
   mkdir -p "$WORK"
-  dir="$WORK/$(basename "${tarball%.tar.*}")"
-  rm -rf "$dir"
+  # Use the tarball's own top-level directory; it does not always match
+  # the file name (e.g. tcl8.6.18-src.tar.gz unpacks to tcl8.6.18).
+  dir="$(tar -tf "$tarball" | awk -F/ '{ sub(/^\.\//, "") } $1 != "" && !d { print $1; d = 1 }')"
+  [ -n "$dir" ] || die "cannot determine top-level directory of $tarball"
+  rm -rf "${WORK:?}/$dir"
   tar -xf "$tarball" -C "$WORK"
-  cd "$dir"
+  cd "$WORK/$dir"
 }
 
 # Run a build step in a subshell and clean up its work directory afterwards.

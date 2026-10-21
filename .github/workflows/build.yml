@@ -166,3 +166,56 @@ jobs:
           name: stage2
           path: out/stage2.tar.zst*
           retention-days: 14
+
+  stage3:
+    name: Stage 3 - base system
+    needs: stage2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore stage 3 cache
+        id: stage3-cache
+        uses: actions/cache@v4
+        with:
+          path: out/stage3.tar.zst*
+          key: stage3-${{ hashFiles('config/build.conf', 'scripts/**') }}
+
+      - name: Download stage 2
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stage2
+          path: out
+
+      - name: Restore sources
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: sources
+          key: sources-${{ hashFiles('config/build.conf') }}
+          fail-on-cache-miss: true
+
+      - name: Free disk space
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Restore stage 2 into $LFS
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        run: sudo scripts/unpack-stage.sh stage2
+
+      - name: Build the base system in chroot
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        run: sudo scripts/chroot-build.sh scripts/stage3-chroot
+
+      - name: Pack stage 3
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        run: sudo scripts/pack-stage.sh stage3
+
+      - name: Upload stage 3
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage3
+          path: out/stage3.tar.zst*
+          retention-days: 14
