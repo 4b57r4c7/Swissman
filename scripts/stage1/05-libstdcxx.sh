@@ -3,6 +3,7 @@ enter_src gcc
 mkdir -v build && cd build
 ../libstdc++-v3/configure --host="$SWISSMAN_TGT" \
                           --build="$(../config.guess)" \
+                          CXX="$SWISSMAN_TGT-gcc" \
                           --prefix=/usr \
                           --disable-multilib \
                           --disable-nls \

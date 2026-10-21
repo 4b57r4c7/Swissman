@@ -32,10 +32,14 @@ src_version() {
 }
 
 # Path of a patch from the LFS patch set, e.g. `src_patch glibc fhs-1`.
+# The book names patches either with or without the package version.
+# Prints nothing for an optional patch (third argument "optional").
 src_patch() {
-  local p="$SOURCES/$1-$(src_version "$1")-$2.patch"
-  [ -f "$p" ] || die "missing patch $p"
-  printf '%s\n' "$p"
+  local p
+  for p in "$SOURCES/$1-$(src_version "$1")-$2.patch" "$SOURCES/$1-$2.patch"; do
+    [ -f "$p" ] && { printf '%s\n' "$p"; return; }
+  done
+  [ "${3:-}" = optional ] || die "missing patch $1 $2"
 }
 
 # Extract a package into a fresh work directory and cd into it.

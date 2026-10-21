@@ -16,6 +16,7 @@ mkdir -v build && cd build
              --without-headers \
              --enable-default-pie \
              --enable-default-ssp \
+             --disable-fixincludes \
              --disable-nls \
              --disable-shared \
              --disable-multilib \
@@ -32,5 +33,5 @@ make install
 
 # The internal limits.h installed above is incomplete until glibc exists.
 cd ..
-cat gcc/limitx.h gcc/glimits.h gcc/limity.h > \
-  "$(dirname "$("$SWISSMAN_TGT-gcc" -print-libgcc-file-name)")/include/limits.h"
+cat gcc/{limitx,glimits,limity}.h > \
+  "$("$SWISSMAN_TGT-gcc" -print-file-name=include)/limits.h"
