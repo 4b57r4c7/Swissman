@@ -112,7 +112,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: out/stage2.tar.zst*
-          key: stage2-${{ hashFiles('config/build.conf', 'scripts/**') }}
+          # Only the scripts this stage depends on, so later stages can change
+          # without rebuilding it.
+          key: stage2-${{ hashFiles('config/build.conf', 'scripts/lib.sh', 'scripts/build-stage1.sh', 'scripts/stage1/**', 'scripts/build-stage2.sh', 'scripts/run-steps.sh', 'scripts/chroot-build.sh', 'scripts/unpack-stage.sh', 'scripts/pack-stage.sh', 'scripts/stage2/**', 'scripts/stage2-chroot/**') }}
 
       - name: Download stage 1
         if: steps.stage2-cache.outputs.cache-hit != 'true'
@@ -166,3 +168,146 @@ jobs:
           name: stage2
           path: out/stage2.tar.zst*
           retention-days: 14
+
+  stage3:
+    name: Stage 3 - base system
+    needs: stage2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore stage 3 cache
+        id: stage3-cache
+        uses: actions/cache@v4
+        with:
+          path: out/stage3.tar.zst*
+          key: stage3-${{ hashFiles('config/build.conf', 'scripts/lib.sh', 'scripts/build-stage1.sh', 'scripts/stage1/**', 'scripts/build-stage2.sh', 'scripts/run-steps.sh', 'scripts/chroot-build.sh', 'scripts/unpack-stage.sh', 'scripts/pack-stage.sh', 'scripts/stage2/**', 'scripts/stage2-chroot/**', 'scripts/stage3-chroot/**') }}
+
+      - name: Download stage 2
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stage2
+          path: out
+
+      - name: Restore sources
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: sources
+          key: sources-${{ hashFiles('config/build.conf') }}
+          fail-on-cache-miss: true
+
+      - name: Free disk space
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Restore stage 2 into $LFS
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        run: sudo scripts/unpack-stage.sh stage2
+
+      - name: Build the base system in chroot
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        run: sudo scripts/chroot-build.sh scripts/stage3-chroot
+
+      - name: Pack stage 3
+        if: steps.stage3-cache.outputs.cache-hit != 'true'
+        run: sudo scripts/pack-stage.sh stage3
+
+      - name: Upload stage 3
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage3
+          path: out/stage3.tar.zst*
+          retention-days: 14
+
+  iso:
+    name: Stage 4 - kernel and ISO
+    needs: stage3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore ISO cache
+        id: iso-cache
+        uses: actions/cache@v4
+        with:
+          path: out/swissman.iso*
+          key: iso-${{ hashFiles('config/**', 'scripts/**') }}
+
+      - name: Download stage 3
+        if: steps.iso-cache.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stage3
+          path: out
+
+      - name: Restore sources
+        if: steps.iso-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: sources
+          key: sources-${{ hashFiles('config/build.conf') }}
+          fail-on-cache-miss: true
+
+      - name: Install host packages
+        if: steps.iso-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            squashfs-tools xorriso mtools dosfstools zstd
+
+      - name: Restore stage 3 into $LFS
+        if: steps.iso-cache.outputs.cache-hit != 'true'
+        run: sudo scripts/unpack-stage.sh stage3
+
+      - name: Configure the system and build the kernel
+        if: steps.iso-cache.outputs.cache-hit != 'true'
+        run: sudo scripts/chroot-build.sh scripts/stage4-chroot
+
+      - name: Build the ISO
+        if: steps.iso-cache.outputs.cache-hit != 'true'
+        run: sudo scripts/make-iso.sh
+
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: swissman-iso
+          path: out/swissman.iso*
+          retention-days: 14
+
+  boot-test:
+    name: Boot test in QEMU
+    needs: iso
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ISO
+        uses: actions/download-artifact@v4
+        with:
+          name: swissman-iso
+          path: out
+
+      - name: Install QEMU and UEFI firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+          # Let the runner user use KVM if the machine offers it.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+
+      - name: Boot the ISO
+        run: tests/qemu-boot.py out/swissman.iso 900
+
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-log
+          path: out/boot.log
