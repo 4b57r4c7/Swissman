@@ -1,0 +1,100 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  LFS: /mnt/lfs
+
+jobs:
+  sources:
+    name: Fetch and verify sources
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore source cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: sources
+          key: sources-${{ hashFiles('config/build.conf') }}
+
+      - name: Download sources
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: scripts/fetch-sources.sh
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-checksums
+          path: |
+            sources/md5sums
+            sources/SHA256SUMS
+
+  stage1:
+    name: Stage 1 - cross toolchain
+    needs: sources
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore stage 1 cache
+        id: stage1-cache
+        uses: actions/cache@v4
+        with:
+          path: out/stage1.tar.zst*
+          key: stage1-${{ hashFiles('config/build.conf', 'scripts/lib.sh', 'scripts/build-stage1.sh', 'scripts/stage1/**') }}
+
+      - name: Restore sources
+        if: steps.stage1-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: sources
+          key: sources-${{ hashFiles('config/build.conf') }}
+          fail-on-cache-miss: true
+
+      - name: Install host packages
+        if: steps.stage1-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison gawk m4 texinfo python3 xz-utils zstd
+          # LFS expects /bin/sh to be bash.
+          sudo ln -sf bash /usr/bin/sh
+
+      - name: Check host
+        if: steps.stage1-cache.outputs.cache-hit != 'true'
+        run: scripts/host-check.sh
+
+      - name: Prepare $LFS
+        if: steps.stage1-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo mkdir -p "$LFS"
+          sudo chown "$(id -u):$(id -g)" "$LFS"
+
+      - name: Build cross toolchain
+        if: steps.stage1-cache.outputs.cache-hit != 'true'
+        run: scripts/build-stage1.sh
+
+      - name: Pack stage 1
+        if: steps.stage1-cache.outputs.cache-hit != 'true'
+        run: scripts/pack-stage.sh stage1
+
+      - name: Upload stage 1
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage1
+          path: out/stage1.tar.zst*
+          retention-days: 14
