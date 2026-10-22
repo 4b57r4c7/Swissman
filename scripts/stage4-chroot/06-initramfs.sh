@@ -15,7 +15,7 @@ copy_libs() {
     cp -L "$lib" "$dst/usr/lib/"
   done
 }
-for bin in bash mount umount switch_root blkid mkdir sleep cryptsetup \
+for bin in bash mount umount switch_root blkid mkdir sleep setsid cryptsetup \
     /usr/lib/systemd/systemd-cryptsetup; do
   bin="$(command -v "$bin")"
   install -m755 "$bin" "$dst/bin/"
@@ -107,9 +107,11 @@ boot_installed() {
       wait_for_security_key
       # The password prompt keeps its state under /run/systemd. The FIDO2
       # support built into systemd-cryptsetup does not need the token
-      # plugin of libcryptsetup, which the initramfs leaves out.
+      # plugin of libcryptsetup, which the initramfs leaves out. It shows
+      # its prompts on the controlling terminal, which init does not have,
+      # so it runs in a new session with the console as that terminal.
       mkdir -p /run/systemd/ask-password
-      SYSTEMD_CRYPTSETUP_USE_TOKEN_MODULE=0 systemd-cryptsetup attach root "$dev" - \
+      SYSTEMD_CRYPTSETUP_USE_TOKEN_MODULE=0 setsid -c -w systemd-cryptsetup attach root "$dev" - \
         fido2-device=auto,token-timeout=15s,tries=3 || rescue "cannot unlock $dev"
     else
       # cryptsetup asks for the passphrase on the console, up to three times.
