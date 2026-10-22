@@ -1,7 +1,7 @@
 # Contents of the initramfs that is built into the kernel. With
 # swissman.root=<blkid tag> on the kernel command line it boots an
-# installed system: it unlocks the root partition if it is LUKS encrypted
-# and mounts it. Without it, it boots the live system: it finds the boot
+# installed system: it unlocks the root partition if it is LUKS encrypted,
+# with a FIDO2 security key when one is enrolled, and mounts it. Without it, it boots the live system: it finds the boot
 # medium by its label and mounts the compressed root file system with a
 # writable layer in RAM on top. Either way it then hands over to systemd.
 dst=/usr/src/initramfs
@@ -9,15 +9,22 @@ rm -rf "$dst"
 mkdir -pv "$dst"/{bin,dev,proc,sys,run,media,lower,rw,newroot,usr/lib,lib64}
 ln -sv usr/lib "$dst/lib"
 
-copy_with_libs() {
-  local bin="$1" lib
-  install -m755 "$(command -v "$bin")" "$dst/bin/"
-  for lib in $(ldd "$(command -v "$bin")" | grep -o '/[^ ]*'); do
+copy_libs() {
+  local lib
+  for lib in $(ldd "$1" | grep -o '/[^ ]*'); do
     cp -L "$lib" "$dst/usr/lib/"
   done
 }
-for bin in bash mount umount switch_root blkid mkdir sleep cryptsetup; do
-  copy_with_libs "$bin"
+for bin in bash mount umount switch_root blkid mkdir sleep cryptsetup \
+    /usr/lib/systemd/systemd-cryptsetup; do
+  bin="$(command -v "$bin")"
+  install -m755 "$bin" "$dst/bin/"
+  copy_libs "$bin"
+done
+# systemd-cryptsetup loads these at run time, so ldd does not list them.
+for lib in libcryptsetup.so.12 libfido2.so.1; do
+  cp -L "/usr/lib/$lib" "$dst/usr/lib/"
+  copy_libs "/usr/lib/$lib"
 done
 # glibc loads libgcc_s at run time to unwind threads.
 cp -L "$(gcc -print-file-name=libgcc_s.so.1)" "$dst/usr/lib/"
@@ -76,12 +83,38 @@ boot_live() {
   getty_dropin serial-getty@ttyS0.service "--keep-baud 115200,57600,38400,9600"
 }
 
+# Wait a few seconds for a FIDO2 security key: a hidraw device whose
+# report descriptor declares the FIDO usage page (0xF1D0).
+wait_for_security_key() {
+  local d
+  for _ in {1..20}; do
+    for d in /sys/class/hidraw/*/device/report_descriptor; do
+      [ -e "$d" ] && [[ "$(< "$d")" == *$'\x06\xd0\xf1'* ]] 2>/dev/null && return
+    done
+    sleep 0.5
+  done
+}
+
 boot_installed() {
   local dev d
   dev="$(find_device "$1")" || rescue "root device $1 not found"
   if cryptsetup isLuks "$dev"; then
-    # cryptsetup asks for the passphrase on the console, up to three times.
-    cryptsetup open --type luks2 "$dev" root || rescue "cannot unlock $dev"
+    if [[ "$(cryptsetup luksDump "$dev")" == *systemd-fido2* ]]; then
+      # Unlocks with the security key, asking for its PIN and a touch or
+      # fingerprint as enrolled; without the key it asks for the passphrase.
+      echo "Unlocking $dev: insert your security key, or wait to type the passphrase." \
+        > /dev/console
+      wait_for_security_key
+      # The password prompt keeps its state under /run/systemd. The FIDO2
+      # support built into systemd-cryptsetup does not need the token
+      # plugin of libcryptsetup, which the initramfs leaves out.
+      mkdir -p /run/systemd/ask-password
+      SYSTEMD_CRYPTSETUP_USE_TOKEN_MODULE=0 systemd-cryptsetup attach root "$dev" - \
+        fido2-device=auto,token-timeout=15s,tries=3 || rescue "cannot unlock $dev"
+    else
+      # cryptsetup asks for the passphrase on the console, up to three times.
+      cryptsetup open --type luks2 "$dev" root || rescue "cannot unlock $dev"
+    fi
     # Without udev there is no /dev/mapper/root link; find the dm device.
     for d in /sys/block/dm-*; do
       [ "$(< "$d/dm/name")" = root ] && dev="/dev/${d##*/}"

@@ -19,3 +19,4 @@ Swissman е лична, ориентирана към сигурността Lin
 - Ядрото носи вграден initramfs и само по себе си е EFI приложение, така че ISO-то стартира директно чрез UEFI, без отделен bootloader. Това по-късно позволява целият boot път да се подпише за Secure Boot с един подпис.
 - Конфигурацията на ядрото (`config/kernel/swissman.config`) включва hardening настройки от Kernel Self Protection Project, задължителен lockdown и подписани модули.
 - Ядрото се подписва за Secure Boot със собствени ключове, без Microsoft и без shim. Виж [docs/secure-boot.md](docs/secure-boot.md).
+- Root дялът е криптиран с LUKS2 и се отключва с парола или с FIDO2 USB ключ, включително ключ с пръстов отпечатък. Виж [docs/disk-encryption.md](docs/disk-encryption.md).
