@@ -252,6 +252,10 @@ jobs:
           key: sources-${{ hashFiles('config/build.conf') }}
           fail-on-cache-miss: true
 
+      - name: Fetch packages from outside the LFS book
+        if: steps.iso-cache.outputs.cache-hit != 'true'
+        run: scripts/fetch-extra-sources.sh
+
       - name: Install host packages
         if: steps.iso-cache.outputs.cache-hit != 'true'
         run: |
