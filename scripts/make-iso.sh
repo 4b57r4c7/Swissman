@@ -37,6 +37,16 @@ truncate -s "${size_kib}K" "$esp"
 mkfs.vfat -n SWISSEFI "$esp"
 mmd -i "$esp" ::/EFI ::/EFI/BOOT
 mcopy -i "$esp" "$kernel" ::/EFI/BOOT/BOOTX64.EFI
+# With release keys, put the public Secure Boot certificates on the ESP in
+# DER form, so firmware setup screens can enroll them from the USB stick.
+certs="$out/secureboot"
+if [ "$(cat "$certs/MODE" 2>/dev/null)" = release ]; then
+  mmd -i "$esp" ::/keys
+  for name in PK KEK db; do
+    openssl x509 -in "$certs/$name.crt" -outform DER -out "$WORK/$name.cer"
+    mcopy -i "$esp" "$WORK/$name.cer" "::/keys/$name.cer"
+  done
+fi
 
 log "Writing the ISO"
 iso="$out/swissman.iso"

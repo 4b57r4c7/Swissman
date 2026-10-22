@@ -2,11 +2,19 @@
 """Boot Swissman in QEMU with UEFI firmware and check the running system.
 
 Usage:
-  qemu-boot.py live <iso> [timeout-seconds]
-  qemu-boot.py encrypted <kernel> <disk> <luks-uuid> <passphrase> [timeout-seconds]
+  qemu-boot.py live <iso> [--secure-boot <vars>] [--timeout <seconds>]
+  qemu-boot.py encrypted <kernel> <disk> <luks-uuid> <passphrase> [--timeout <seconds>]
+  qemu-boot.py rejected <iso> --secure-boot <vars> [--timeout <seconds>]
 
 live: boots the ISO, waits for the live system to log root in on the
-serial console, then runs the checks in CHECKS there.
+serial console, then runs the checks in CHECKS there. With --secure-boot,
+the firmware enforces Secure Boot with the keys enrolled in the given
+variable store (see make-secureboot-vars.sh), and the live system must
+report Secure Boot as enabled.
+
+rejected: with Secure Boot enforced by a variable store that trusts other
+keys than the ones the ISO was signed with, the firmware must refuse to
+start the ISO's boot loader.
 
 encrypted: boots the kernel on its own against a disk made by
 make-encrypted-disk.sh, the way an installed system boots. It first
@@ -17,6 +25,7 @@ The serial console is copied to stdout and to out/boot-<mode>.log. Exits 0
 on success, 1 on a kernel panic, an initramfs rescue shell, a failed check
 or a timeout.
 """
+import argparse
 import os
 import shutil
 import subprocess
@@ -25,6 +34,7 @@ import tempfile
 import time
 
 OVMF_CODE = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+OVMF_CODE_SECBOOT = "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd"
 OVMF_VARS = "/usr/share/OVMF/OVMF_VARS_4M.fd"
 FAILURES = [b"Kernel panic", b"rescue shell", b"Failed to start Switch Root"]
 CHECK_TIMEOUT = 120
@@ -39,15 +49,27 @@ CHECKS = {
               "[ \"$(sysctl -n kernel.yama.ptrace_scope)\" = 2 ]",
     "lockdown": "grep -q '\\[integrity\\]' /sys/kernel/security/lockdown",
 }
+# The last byte of the SecureBoot variable is 1 when it is enforced.
+SECURE_BOOT_CHECK = ("[ \"$(od -An -tu1 /sys/firmware/efi/efivars/"
+                     "SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c "
+                     "| awk '{print $NF}')\" = 1 ]")
 
 
 class Machine:
-    def __init__(self, args, log_path):
+    def __init__(self, args, log_path, secure_boot_vars=None):
         vars_copy = tempfile.NamedTemporaryFile(suffix=".fd", delete=False).name
-        shutil.copy(OVMF_VARS, vars_copy)
-        cmd = ["qemu-system-x86_64", "-machine", "q35", "-m", "2048", "-smp", "2",
+        shutil.copy(secure_boot_vars or OVMF_VARS, vars_copy)
+        if secure_boot_vars:
+            # The Secure Boot firmware keeps its variables in SMM.
+            machine = ["-machine", "q35,smm=on",
+                       "-global", "driver=cfi.pflash01,property=secure,value=on"]
+            code = OVMF_CODE_SECBOOT
+        else:
+            machine = ["-machine", "q35"]
+            code = OVMF_CODE
+        cmd = ["qemu-system-x86_64"] + machine + ["-m", "2048", "-smp", "2",
                "-nographic", "-no-reboot",
-               "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
+               "-drive", f"if=pflash,format=raw,readonly=on,file={code}",
                "-drive", f"if=pflash,format=raw,file={vars_copy}"] + args
         if os.access("/dev/kvm", os.R_OK | os.W_OK):
             cmd[1:1] = ["-enable-kvm", "-cpu", "host"]
@@ -96,26 +118,30 @@ class Machine:
         self.proc.kill()
 
 
-def test_live(iso, timeout):
-    vm = Machine(["-cdrom", iso], "out/boot-live.log")
+def test_live(iso, timeout, secure_boot_vars=None):
+    checks = dict(CHECKS)
+    if secure_boot_vars:
+        checks["secureboot"] = SECURE_BOOT_CHECK
+    log = "out/boot-live-secureboot.log" if secure_boot_vars else "out/boot-live.log"
+    vm = Machine(["-cdrom", iso], log, secure_boot_vars)
     try:
         error = vm.expect(b"(automatic login)", timeout)
         if error:
             return f"{error} before the automatic login", False
         time.sleep(3)  # let the shell start
         vm.forget()
-        for name, check in CHECKS.items():
+        for name, check in checks.items():
             vm.send(f"if {check}; then echo CHECK-'{name}'-ok; "
                     f"else echo CHECK-'{name}'-failed; fi")
             time.sleep(0.5)
-        markers = [f"CHECK-{n}-".encode() for n in CHECKS]
+        markers = [f"CHECK-{n}-".encode() for n in checks]
         error = vm.wait_for(lambda s: all(m in s for m in markers), CHECK_TIMEOUT)
-        failed = [n for n in CHECKS if f"CHECK-{n}-ok".encode() not in vm.seen]
+        failed = [n for n in checks if f"CHECK-{n}-ok".encode() not in vm.seen]
         if error:
             return f"{error} while running checks", False
         if failed:
             return f"checks failed: {', '.join(failed)}", False
-        return f"all checks passed: {', '.join(CHECKS)}", True
+        return f"all checks passed: {', '.join(checks)}", True
     finally:
         vm.kill()
 
@@ -147,17 +173,38 @@ def test_encrypted(kernel, disk, uuid, passphrase, timeout):
         vm.kill()
 
 
+def test_rejected(iso, timeout, secure_boot_vars):
+    vm = Machine(["-cdrom", iso], "out/boot-rejected.log", secure_boot_vars)
+    try:
+        # OVMF reports the refused image and moves on to the next boot
+        # option; the kernel must never start.
+        error = vm.wait_for(lambda s: b"Access Denied" in s or b"Linux version" in s,
+                            timeout)
+        if error:
+            return f"{error} waiting for the firmware to refuse the image", False
+        if b"Linux version" in vm.seen:
+            return "the firmware started a kernel signed by an unknown key", False
+        return "the firmware refused a boot loader signed by an unknown key", True
+    finally:
+        vm.kill()
+
+
 def main():
-    mode, args = sys.argv[1], sys.argv[2:]
-    if mode == "live":
-        timeout = int(args[1]) if len(args) > 1 else 900
-        message, ok = test_live(args[0], timeout)
-    elif mode == "encrypted":
-        timeout = int(args[4]) if len(args) > 4 else 900
-        message, ok = test_encrypted(*args[:4], timeout)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("mode", choices=["live", "encrypted", "rejected"])
+    parser.add_argument("args", nargs="+")
+    parser.add_argument("--secure-boot", metavar="VARS")
+    parser.add_argument("--timeout", type=int, default=900)
+    opts = parser.parse_args()
+    if opts.mode == "live":
+        message, ok = test_live(*opts.args, opts.timeout, opts.secure_boot)
+    elif opts.mode == "encrypted":
+        message, ok = test_encrypted(*opts.args, opts.timeout)
     else:
-        sys.exit(__doc__)
-    print(f"\n==> Boot test ({mode}): {message}", flush=True)
+        if not opts.secure_boot:
+            parser.error("rejected needs --secure-boot")
+        message, ok = test_rejected(*opts.args, opts.timeout, opts.secure_boot)
+    print(f"\n==> Boot test ({opts.mode}): {message}", flush=True)
     sys.exit(0 if ok else 1)
 
 
