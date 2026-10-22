@@ -48,8 +48,19 @@ mkdir -p /newroot/run/live
 mount -t tmpfs tmpfs /newroot/run
 mkdir -p /newroot/run/live/{medium,lower,rw}
 for m in media:medium lower:lower rw:rw; do
-  mount --move "/${m%%:*}" "/newroot/run/live/${m#*:}"
+  mount -n --move "/${m%%:*}" "/newroot/run/live/${m#*:}"
 done
+
+# The live system logs root in on the console without a password; the
+# root account itself stays locked. systemd keeps /run from the initramfs
+# and reads these drop-ins from it, so an installed system never has them.
+getty_dropin() {
+  mkdir -p "/newroot/run/systemd/system/$1.d"
+  printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty -o %s --autologin root %s - $TERM\n' \
+    "'-p -f -- \\\\u'" "$2" > "/newroot/run/systemd/system/$1.d/live-autologin.conf"
+}
+getty_dropin getty@tty1.service --noclear
+getty_dropin serial-getty@ttyS0.service "--keep-baud 115200,57600,38400,9600"
 
 exec switch_root /newroot /usr/lib/systemd/systemd
 EOF2
