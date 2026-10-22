@@ -2,3 +2,4 @@
 /work/
 /out/
 *.tar.zst
+__pycache__/

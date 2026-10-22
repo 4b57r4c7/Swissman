@@ -48,6 +48,8 @@ xorriso -as mkisofs \
   -appended_part_as_gpt \
   -e --interval:appended_partition_2:all:: -no-emul-boot \
   -output "$iso" "$iso_tree"
-( cd "$out" && sha256sum swissman.iso > swissman.iso.sha256 )
+# The kernel on its own, for booting an installed system in tests.
+install -m644 "$kernel" "$out/swissman.efi"
+( cd "$out" && sha256sum swissman.iso swissman.efi > swissman.sha256 )
 rm -rf "$iso_tree" "$esp"
 log "Wrote $(du -h "$iso" | cut -f1) to out/swissman.iso"
