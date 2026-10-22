@@ -234,7 +234,10 @@ jobs:
         id: iso-cache
         uses: actions/cache@v4
         with:
-          path: out/swissman.iso*
+          path: |
+            out/swissman.iso
+            out/swissman.efi
+            out/swissman.sha256
           key: iso-${{ hashFiles('config/**', 'scripts/**') }}
 
       - name: Download stage 3
@@ -279,7 +282,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: swissman-iso
-          path: out/swissman.iso*
+          path: |
+            out/swissman.iso
+            out/swissman.efi
+            out/swissman.sha256
           retention-days: 14
 
   boot-test:
@@ -296,22 +302,30 @@ jobs:
           name: swissman-iso
           path: out
 
-      - name: Install QEMU and UEFI firmware
+      - name: Install QEMU, UEFI firmware and disk tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf \
+            cryptsetup-bin e2fsprogs fdisk squashfs-tools xorriso
           # Let the runner user use KVM if the machine offers it.
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm || true
 
-      - name: Boot the ISO
-        run: tests/qemu-boot.py out/swissman.iso 900
+      - name: Boot the live ISO
+        run: tests/qemu-boot.py live out/swissman.iso 900
 
-      - name: Upload boot log
+      - name: Boot from an encrypted disk
+        run: |
+          passphrase="test-$(openssl rand -hex 8)"
+          uuid="$(sudo tests/make-encrypted-disk.sh out/swissman.iso out/disk.img "$passphrase")"
+          sudo chown "$(id -u)" out/disk.img
+          tests/qemu-boot.py encrypted out/swissman.efi out/disk.img "$uuid" "$passphrase" 900
+
+      - name: Upload boot logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: boot-log
-          path: out/boot.log
+          name: boot-logs
+          path: out/boot-*.log
