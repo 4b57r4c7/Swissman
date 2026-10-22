@@ -238,6 +238,7 @@ jobs:
             out/swissman.iso
             out/swissman.efi
             out/swissman.sha256
+            out/secureboot/
           key: iso-${{ hashFiles('config/**', 'scripts/**') }}
 
       - name: Download stage 3
@@ -264,7 +265,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            squashfs-tools xorriso mtools dosfstools zstd
+            squashfs-tools xorriso mtools dosfstools zstd sbsigntool
 
       - name: Restore stage 3 into $LFS
         if: steps.iso-cache.outputs.cache-hit != 'true'
@@ -273,6 +274,12 @@ jobs:
       - name: Configure the system and build the kernel
         if: steps.iso-cache.outputs.cache-hit != 'true'
         run: sudo scripts/chroot-build.sh scripts/stage4-chroot
+
+      - name: Sign the kernel for Secure Boot
+        if: steps.iso-cache.outputs.cache-hit != 'true'
+        env:
+          SECUREBOOT_DB_KEY: ${{ secrets.SECUREBOOT_DB_KEY }}
+        run: sudo --preserve-env=SECUREBOOT_DB_KEY scripts/sign-kernel.sh
 
       - name: Build the ISO
         if: steps.iso-cache.outputs.cache-hit != 'true'
@@ -286,6 +293,7 @@ jobs:
             out/swissman.iso
             out/swissman.efi
             out/swissman.sha256
+            out/secureboot/
           retention-days: 14
 
   boot-test:
@@ -306,7 +314,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf \
-            cryptsetup-bin e2fsprogs fdisk squashfs-tools xorriso
+            python3-virt-firmware cryptsetup-bin e2fsprogs fdisk squashfs-tools xorriso
           # Let the runner user use KVM if the machine offers it.
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -314,14 +322,25 @@ jobs:
           sudo udevadm trigger --name-match=kvm || true
 
       - name: Boot the live ISO
-        run: tests/qemu-boot.py live out/swissman.iso 900
+        run: tests/qemu-boot.py live out/swissman.iso
+
+      - name: Boot the live ISO with Secure Boot enforced
+        run: |
+          tests/make-secureboot-vars.sh out/secureboot out/vars-secureboot.fd
+          tests/qemu-boot.py live out/swissman.iso --secure-boot out/vars-secureboot.fd
+
+      - name: Check that Secure Boot refuses a kernel signed by another key
+        run: |
+          tools/make-secureboot-keys.sh "$RUNNER_TEMP/other-keys" Other
+          tests/make-secureboot-vars.sh "$RUNNER_TEMP/other-keys" out/vars-other.fd
+          tests/qemu-boot.py rejected out/swissman.iso --secure-boot out/vars-other.fd --timeout 300
 
       - name: Boot from an encrypted disk
         run: |
           passphrase="test-$(openssl rand -hex 8)"
           uuid="$(sudo tests/make-encrypted-disk.sh out/swissman.iso out/disk.img "$passphrase")"
           sudo chown "$(id -u)" out/disk.img
-          tests/qemu-boot.py encrypted out/swissman.efi out/disk.img "$uuid" "$passphrase" 900
+          tests/qemu-boot.py encrypted out/swissman.efi out/disk.img "$uuid" "$passphrase"
 
       - name: Upload boot logs
         if: always()
