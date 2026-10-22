@@ -13,13 +13,15 @@
   make
   make install
 )
+# json-c 0.18 still declares support for CMake older than 3.5, which
+# CMake 4 refuses without the policy minimum.
 (
   enter_src json-c
   mkdir build
   cd build
   cmake -D CMAKE_INSTALL_PREFIX=/usr -D CMAKE_INSTALL_LIBDIR=lib \
     -D CMAKE_BUILD_TYPE=Release -D BUILD_STATIC_LIBS=OFF -D BUILD_TESTING=OFF \
-    -D DISABLE_EXTRA_LIBS=ON ..
+    -D DISABLE_EXTRA_LIBS=ON -D CMAKE_POLICY_VERSION_MINIMUM=3.5 ..
   make
   make install
 )
