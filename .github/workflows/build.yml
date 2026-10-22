@@ -314,7 +314,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf \
-            python3-virt-firmware cryptsetup-bin e2fsprogs fdisk squashfs-tools xorriso
+            python3-virt-firmware cryptsetup-bin e2fsprogs fdisk squashfs-tools xorriso \
+            systemd-cryptsetup libfido2-1 python3-fido2 python3-cryptography
           # Let the runner user use KVM if the machine offers it.
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -341,6 +342,22 @@ jobs:
           uuid="$(sudo tests/make-encrypted-disk.sh out/swissman.iso out/disk.img "$passphrase")"
           sudo chown "$(id -u)" out/disk.img
           tests/qemu-boot.py encrypted out/swissman.efi out/disk.img "$uuid" "$passphrase"
+          echo "PASSPHRASE=$passphrase" >> "$GITHUB_ENV"
+          echo "LUKS_UUID=$uuid" >> "$GITHUB_ENV"
+
+      - name: Unlock the encrypted disk with a FIDO2 security key
+        run: |
+          # A software security key on the runner stands in for a real one.
+          sudo modprobe uhid || {
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe uhid
+          }
+          sudo -b python3 tests/virtual-fido2.py --hidraw-file "$RUNNER_TEMP/hidraw"
+          for _ in $(seq 30); do [ -s "$RUNNER_TEMP/hidraw" ] && break; sleep 1; done
+          hidraw="$(cat "$RUNNER_TEMP/hidraw")"
+          sudo chmod 666 "$hidraw"
+          sudo tests/enroll-fido2.sh out/disk.img "$PASSPHRASE" "$hidraw"
+          tests/qemu-boot.py fido2 out/swissman.efi out/disk.img "$LUKS_UUID" "$PASSPHRASE" "$hidraw"
 
       - name: Upload boot logs
         if: always()

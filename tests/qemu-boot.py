@@ -5,6 +5,7 @@ Usage:
   qemu-boot.py live <iso> [--secure-boot <vars>] [--timeout <seconds>]
   qemu-boot.py encrypted <kernel> <disk> <luks-uuid> <passphrase> [--timeout <seconds>]
   qemu-boot.py rejected <iso> --secure-boot <vars> [--timeout <seconds>]
+  qemu-boot.py fido2 <kernel> <disk> <luks-uuid> <passphrase> <hidraw> [--timeout <seconds>]
 
 live: boots the ISO, waits for the live system to log root in on the
 serial console, then runs the checks in CHECKS there. With --secure-boot,
@@ -20,6 +21,12 @@ encrypted: boots the kernel on its own against a disk made by
 make-encrypted-disk.sh, the way an installed system boots. It first
 enters a wrong passphrase, which must be refused, then the right one,
 and waits for the login prompt of the system on the encrypted disk.
+
+fido2: the disk also has a FIDO2 security key enrolled (enroll-fido2.sh).
+The host's key, given as its hidraw device, is passed through to the
+machine, which must unlock the disk with it without asking for the
+passphrase. Then it boots again without the key, and the passphrase must
+still unlock the disk.
 
 The serial console is copied to stdout and to out/boot-<mode>.log. Exits 0
 on success, 1 on a kernel panic, an initramfs rescue shell, a failed check
@@ -173,6 +180,37 @@ def test_encrypted(kernel, disk, uuid, passphrase, timeout):
         vm.kill()
 
 
+def test_fido2(kernel, disk, uuid, passphrase, hidraw, timeout):
+    base = ["-kernel", kernel, "-append", f"swissman.root=UUID={uuid}",
+            "-drive", f"if=virtio,format=raw,file={disk}"]
+    key = ["-device", "qemu-xhci", "-device", f"u2f-passthru,hidraw={hidraw}"]
+    asked = b"passphrase for disk"
+
+    vm = Machine(base + key, "out/boot-fido2.log")
+    try:
+        error = vm.wait_for(lambda s: b"login:" in s or asked in s, timeout)
+        if error:
+            return f"{error} before unlocking with the security key", False
+        if asked in vm.seen:
+            return "asked for the passphrase although the security key was present", False
+    finally:
+        vm.kill()
+
+    vm = Machine(base, "out/boot-fido2-fallback.log")
+    try:
+        error = vm.expect(asked, timeout)
+        if error:
+            return f"{error} before the passphrase prompt without the key", False
+        vm.forget()
+        vm.send(passphrase)
+        error = vm.expect(b"login:", timeout)
+        if error:
+            return f"{error} after typing the passphrase without the key", False
+    finally:
+        vm.kill()
+    return "unlocked with the security key, and with the passphrase without it", True
+
+
 def test_rejected(iso, timeout, secure_boot_vars):
     vm = Machine(["-cdrom", iso], "out/boot-rejected.log", secure_boot_vars)
     try:
@@ -191,7 +229,7 @@ def test_rejected(iso, timeout, secure_boot_vars):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("mode", choices=["live", "encrypted", "rejected"])
+    parser.add_argument("mode", choices=["live", "encrypted", "fido2", "rejected"])
     parser.add_argument("args", nargs="+")
     parser.add_argument("--secure-boot", metavar="VARS")
     parser.add_argument("--timeout", type=int, default=900)
@@ -200,6 +238,8 @@ def main():
         message, ok = test_live(*opts.args, opts.timeout, opts.secure_boot)
     elif opts.mode == "encrypted":
         message, ok = test_encrypted(*opts.args, opts.timeout)
+    elif opts.mode == "fido2":
+        message, ok = test_fido2(*opts.args, opts.timeout)
     else:
         if not opts.secure_boot:
             parser.error("rejected needs --secure-boot")
