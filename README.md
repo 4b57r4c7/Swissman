@@ -20,3 +20,5 @@ Swissman е лична, ориентирана към сигурността Lin
 - Конфигурацията на ядрото (`config/kernel/swissman.config`) включва hardening настройки от Kernel Self Protection Project, задължителен lockdown и подписани модули.
 - Ядрото се подписва за Secure Boot със собствени ключове, без Microsoft и без shim. Виж [docs/secure-boot.md](docs/secure-boot.md).
 - Root дялът е криптиран с LUKS2 и се отключва с парола или с FIDO2 USB ключ, включително ключ с пръстов отпечатък. Виж [docs/disk-encryption.md](docs/disk-encryption.md).
+- Инсталаторът (`swissman-install`) генерира Secure Boot ключовете на самия компютър, подписва с тях ядрото, командния ред и initramfs-а като един файл (UKI) и ги записва във firmware-а. Виж [docs/installation.md](docs/installation.md).
+- Обновленията са цели издания от GitHub Releases, подписани с Ed25519 ключ. `/usr` се сменя целият при стартиране, а предишната версия остава за връщане назад. Виж [docs/updates.md](docs/updates.md).

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Sign the kernel in $LFS/boot for UEFI Secure Boot. Runs on the build host
-# as root; needs sbsigntool and openssl.
+# Sign the kernel in $LFS/boot for UEFI Secure Boot, as the boot loader of
+# the live ISO. The signed copy goes to out/swissman.efi; the kernel in the
+# system stays unsigned, because the installer signs it with the
+# computer's own keys. Runs on the build host as root; needs sbsigntool
+# and openssl.
 #
 # Release builds sign with the db key from the SECUREBOOT_DB_KEY
 # environment variable (a PEM private key, from a repository secret) and
@@ -39,7 +42,7 @@ else
 fi
 cp "$certs/db.crt" "$keys/db.crt"
 
-sbsign --key "$keys/db.key" --cert "$keys/db.crt" --output "$kernel.signed" "$kernel"
-sbverify --cert "$keys/db.crt" "$kernel.signed"
-mv "$kernel.signed" "$kernel"
-log "Signed $(basename "$kernel") ($(cat "$certs/MODE") keys)"
+signed="$REPO_ROOT/out/swissman.efi"
+sbsign --key "$keys/db.key" --cert "$keys/db.crt" --output "$signed" "$kernel"
+sbverify --cert "$keys/db.crt" "$signed"
+log "Signed $(basename "$kernel") ($(cat "$certs/MODE") keys) as out/swissman.efi"

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Assemble the live ISO from $LFS: the root file system as a squashfs image
-# and the kernel (with its built-in initramfs) as the EFI boot loader.
+# and the kernel signed by sign-kernel.sh (out/swissman.efi, with its
+# built-in initramfs) as the EFI boot loader.
 # Runs on the build host as root; needs squashfs-tools, xorriso, mtools
 # and dosfstools.
 . "$(dirname "$0")/lib.sh"
 
 [ "$(id -u)" -eq 0 ] || die "make-iso.sh must run as root"
-# vmlinuz.efi is a symlink to the versioned image; size and copy the real file.
-kernel="$(readlink -f "$LFS/boot/vmlinuz.efi")"
-[ -f "$kernel" ] || die "kernel not found at $LFS/boot/vmlinuz.efi"
+kernel="$REPO_ROOT/out/swissman.efi"
+[ -f "$kernel" ] || die "signed kernel not found at out/swissman.efi; run sign-kernel.sh"
 
 # Files installed by the unprivileged build user in stages 1 and 2 (the
 # top-level directory and the /bin, /lib and /sbin symlinks) still carry
@@ -58,8 +58,7 @@ xorriso -as mkisofs \
   -appended_part_as_gpt \
   -e --interval:appended_partition_2:all:: -no-emul-boot \
   -output "$iso" "$iso_tree"
-# The kernel on its own, for booting an installed system in tests.
-install -m644 "$kernel" "$out/swissman.efi"
+# out/swissman.efi stays next to the ISO for booting test disks directly.
 ( cd "$out" && sha256sum swissman.iso swissman.efi > swissman.sha256 )
 rm -rf "$iso_tree" "$esp"
 log "Wrote $(du -h "$iso" | cut -f1) to out/swissman.iso"

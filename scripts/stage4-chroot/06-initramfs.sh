@@ -1,7 +1,9 @@
 # Contents of the initramfs that is built into the kernel. With
 # swissman.root=<blkid tag> on the kernel command line it boots an
 # installed system: it unlocks the root partition if it is LUKS encrypted,
-# with a FIDO2 security key when one is enrolled, and mounts it. Without it, it boots the live system: it finds the boot
+# with a FIDO2 security key when one is enrolled, mounts it and finishes
+# a staged update (see swissman-update). Without it, it boots the live
+# system: it finds the boot
 # medium by its label and mounts the compressed root file system with a
 # writable layer in RAM on top. Either way it then hands over to systemd.
 dst=/usr/src/initramfs
@@ -15,7 +17,7 @@ copy_libs() {
     cp -L "$lib" "$dst/usr/lib/"
   done
 }
-for bin in bash mount umount switch_root blkid mkdir sleep setsid cryptsetup \
+for bin in bash mount umount switch_root blkid mkdir mv sleep setsid cryptsetup \
     /usr/lib/systemd/systemd-cryptsetup; do
   bin="$(command -v "$bin")"
   install -m755 "$bin" "$dst/bin/"
@@ -123,6 +125,28 @@ boot_installed() {
     done
   fi
   mount -o rw "$dev" /newroot || rescue "cannot mount $dev"
+  apply_update
+}
+
+# swissman-update unpacks a new /usr as /usr.new, writes its version to
+# /.swissman-update and installs the matching kernel. Switch to it before
+# anything runs from /usr, keeping the old one as /usr.old. Each step is a
+# rename, so an interrupted switch is finished on the next start.
+apply_update() {
+  local r=/newroot state=/newroot/var/lib/swissman
+  [ -d $r/usr.new ] || return 0
+  if [ -d $r/usr ]; then
+    if [ -e $r/usr.old ]; then
+      echo "swissman: /usr.old is in the way; not applying the staged update" > /dev/console
+      return 0
+    fi
+    mv $r/usr $r/usr.old || rescue "cannot move /usr aside for the update"
+  fi
+  mv $r/usr.new $r/usr || rescue "cannot switch to the updated /usr"
+  mkdir -p $state
+  [ -f $state/version ] && mv $state/version $state/previous-version
+  [ -f $r/.swissman-update ] && mv $r/.swissman-update $state/version
+  echo "swissman: switched to version $(< $state/version)" > /dev/console
 }
 
 root=

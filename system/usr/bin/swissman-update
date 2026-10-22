@@ -1,0 +1,164 @@
+#!/bin/bash
+# Update Swissman from a signed release.
+#
+# Usage: swissman-update [--url <release-url>] [--check] [--allow-downgrade]
+#        swissman-update --rollback
+#        swissman-update --status
+#
+# A release is a MANIFEST file with its signature (MANIFEST.sig) and the
+# root file system image it lists (swissman-rootfs.sfs). The manifest must
+# be signed by a key in /usr/share/swissman/update-keys/ or
+# /etc/swissman/update-keys/ (Ed25519 public keys in PEM form), and the
+# image must match the SHA-256 checksum in it. Older or equal versions are
+# refused unless --allow-downgrade is given.
+#
+# The update replaces /usr as a whole: the new /usr is unpacked next to
+# the running one as /usr.new, and the initramfs swaps them on the next
+# start, keeping the old one as /usr.old. Files that the new release adds
+# to /etc are copied over; files already in /etc are kept. The kernel image
+# is rebuilt from the new /usr and signed with this computer's Secure Boot
+# key; the previous one stays on the EFI partition for --rollback.
+#
+# --rollback goes back to the previous /usr and kernel on the next start.
+#
+# The release URL defaults to URL in /etc/swissman/update.conf, or the
+# latest GitHub release. It can also be a local directory.
+set -euo pipefail
+
+LIB=/usr/lib/swissman
+STATE=/var/lib/swissman
+WORK=/var/tmp/swissman-update
+KEYS=/etc/swissman/secureboot
+ESP=/efi
+URL=https://github.com/4b57r4c7/Swissman/releases/latest/download
+[ -f /etc/swissman/update.conf ] && . /etc/swissman/update.conf
+
+mode=update check= allow_downgrade=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --url) URL="$2"; shift 2 ;;
+    --check) check=1; shift ;;
+    --allow-downgrade) allow_downgrade=1; shift ;;
+    --rollback) mode=rollback; shift ;;
+    --status) mode=status; shift ;;
+    -h|--help) sed -n '2,/^set -/{/^set -/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
+    *) echo "swissman-update: unknown option $1" >&2; exit 1 ;;
+  esac
+done
+
+say() { printf '==> %s\n' "$*"; }
+die() { printf 'swissman-update: %s\n' "$*" >&2; exit 1; }
+
+current_version() {
+  cat "$STATE/version" 2>/dev/null || ( . /usr/lib/os-release; echo "$VERSION_ID" )
+}
+
+# The EFI partition is mounted on first access.
+esp_ready() {
+  ls "$ESP/EFI/Linux/swissman.efi" > /dev/null 2>&1 \
+    || die "the EFI partition is not mounted at $ESP"
+}
+
+# Replace a file on the EFI partition as safely as FAT allows.
+esp_install() {  # esp_install <source> <destination>
+  cp "$1" "$2.new"
+  sync "$2.new"
+  mv "$2.new" "$2"
+}
+
+if [ "$mode" = status ]; then
+  echo "Installed version: $(current_version)"
+  [ -d /usr.new ] && echo "Staged for the next start: $(cat /.swissman-update 2>/dev/null || echo unknown)"
+  [ -d /usr.old ] && echo "Rollback possible to: $(cat "$STATE/previous-version" 2>/dev/null || echo unknown)"
+  exit 0
+fi
+
+[ "$(id -u)" -eq 0 ] || die "run me as root"
+[ ! -d /run/live ] || die "this is the live system; there is nothing to update"
+[ ! -d /usr.new ] || die "an update is already staged; restart the computer first"
+
+if [ "$mode" = rollback ]; then
+  [ -d /usr.old ] || die "there is no previous version to go back to"
+  esp_ready
+  [ -f "$ESP/EFI/Linux/swissman-previous.efi" ] || die "the previous kernel image is missing"
+  say "Going back to version $(cat "$STATE/previous-version" 2>/dev/null || echo unknown)"
+  cp "$STATE/previous-version" /.swissman-update 2>/dev/null || echo unknown > /.swissman-update
+  mv /usr.old /usr.new
+  mv "$ESP/EFI/Linux/swissman.efi" "$ESP/EFI/Linux/swissman-rollback.efi"
+  mv "$ESP/EFI/Linux/swissman-previous.efi" "$ESP/EFI/Linux/swissman.efi"
+  mv "$ESP/EFI/Linux/swissman-rollback.efi" "$ESP/EFI/Linux/swissman-previous.efi"
+  esp_install "$ESP/EFI/Linux/swissman.efi" "$ESP/EFI/BOOT/BOOTX64.EFI"
+  say "Restart the computer to use the previous version."
+  exit 0
+fi
+
+rm -rf "$WORK"
+mkdir -p "$WORK"
+trap 'mountpoint -q "$WORK/mnt" && umount "$WORK/mnt"; rm -rf "$WORK" /usr.new.partial' EXIT
+
+say "Checking $URL"
+"$LIB/fetch" "$URL/MANIFEST" "$WORK/MANIFEST"
+"$LIB/fetch" "$URL/MANIFEST.sig" "$WORK/MANIFEST.sig"
+signed_by=
+for key in /usr/share/swissman/update-keys/*.pem /etc/swissman/update-keys/*.pem; do
+  [ -f "$key" ] || continue
+  if openssl pkeyutl -verify -pubin -inkey "$key" -rawin \
+      -in "$WORK/MANIFEST" -sigfile "$WORK/MANIFEST.sig" > /dev/null 2>&1; then
+    signed_by="$key"
+    break
+  fi
+done
+[ -n "$signed_by" ] || die "the release is not signed by a trusted key; not updating"
+
+version= image= sum=
+{
+  read -r format format_version
+  [ "$format $format_version" = "swissman-release 1" ] || die "unknown release format"
+  while read -r field a b; do
+    case "$field" in
+      version) version="$a" ;;
+      sha256) sum="$a" image="$b" ;;
+    esac
+  done
+} < "$WORK/MANIFEST"
+[[ "$version" =~ ^[0-9A-Za-z.+~-]+$ ]] || die "invalid version in the manifest"
+[[ "$image" =~ ^[0-9A-Za-z._-]+$ && "$sum" =~ ^[0-9a-f]{64}$ ]] || die "invalid image in the manifest"
+
+current="$(current_version)"
+say "Installed version $current, release version $version (signed by $(basename "$signed_by"))"
+if [ "$current" != dev ] && [ -z "$allow_downgrade" ]; then
+  newest="$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -n 1)"
+  if [ "$version" = "$current" ] || [ "$newest" != "$version" ]; then
+    say "Already up to date."
+    exit 0
+  fi
+fi
+if [ -n "$check" ]; then
+  say "Version $version is available."
+  exit 0
+fi
+
+esp_ready
+say "Downloading $image"
+"$LIB/fetch" "$URL/$image" "$WORK/$image"
+echo "$sum  $WORK/$image" | sha256sum -c --quiet - || die "$image does not match the manifest"
+
+say "Unpacking the new system"
+rm -rf /usr.old /usr.new.partial
+mkdir "$WORK/mnt"
+mount -o loop,ro -t squashfs "$WORK/$image" "$WORK/mnt"
+cp -a "$WORK/mnt/usr" /usr.new.partial
+cp -a --update=none "$WORK/mnt/etc/." /etc/
+umount "$WORK/mnt"
+
+say "Building and signing the new kernel image"
+"$LIB/make-uki" /usr.new.partial "$KEYS" "$(cat /etc/swissman/cmdline)" "$WORK/swissman.efi"
+
+# From here on, the next start switches to the new version.
+echo "$version" > /.swissman-update
+mv /usr.new.partial /usr.new
+cp "$ESP/EFI/Linux/swissman.efi" "$ESP/EFI/Linux/swissman-previous.efi"
+esp_install "$WORK/swissman.efi" "$ESP/EFI/Linux/swissman.efi"
+esp_install "$WORK/swissman.efi" "$ESP/EFI/BOOT/BOOTX64.EFI"
+sync
+say "Version $version is ready. Restart the computer to use it."

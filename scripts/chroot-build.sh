@@ -36,7 +36,7 @@ fi
 
 log "Copying build scripts and sources into the chroot"
 mkdir -p "$LFS/swissman"
-cp -a "$REPO_ROOT"/{config,scripts} "$LFS/swissman/"
+cp -a "$REPO_ROOT"/{config,scripts,system,tools} "$LFS/swissman/"
 cp -a "$SOURCES" "$LFS/swissman/$SOURCES_DIR"
 
 # LFS chapter 7.4: enter the chroot with a clean environment.
@@ -47,4 +47,5 @@ chroot "$LFS" /usr/bin/env -i \
   MAKEFLAGS="-j$JOBS" \
   TESTSUITEFLAGS="-j$JOBS" \
   JOBS="$JOBS" \
+  SWISSMAN_VERSION="${SWISSMAN_VERSION:-dev}" \
   /bin/bash /swissman/scripts/run-steps.sh "/swissman/$steps"

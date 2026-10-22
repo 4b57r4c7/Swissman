@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""Download a URL to a file: fetch <url> <output>.
+
+HTTPS certificates are checked against /etc/ssl/cert.pem. A plain path
+is copied instead, so updates can also come from a local directory.
+"""
+import shutil
+import sys
+import urllib.request
+
+url, output = sys.argv[1:3]
+try:
+    if url.startswith("/"):
+        shutil.copyfile(url, output)
+    else:
+        request = urllib.request.Request(url, headers={"User-Agent": "swissman-update"})
+        with urllib.request.urlopen(request, timeout=60) as response, open(output, "wb") as f:
+            shutil.copyfileobj(response, f, 1 << 20)
+except OSError as e:
+    sys.exit(f"fetch: {url}: {e}")

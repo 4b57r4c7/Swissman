@@ -1,8 +1,14 @@
 # FIDO2 security keys for unlocking encrypted disks: libcbor and libfido2
-# (BLFS) with its fido2-token tool, then systemd again with cryptsetup and FIDO2 support, which the
-# LFS build leaves out. That adds systemd-cryptenroll, to enroll a key
-# into a LUKS2 header, and systemd-cryptsetup, which the initramfs uses to
-# unlock with it. systemd loads libcryptsetup and libfido2 at run time.
+# (BLFS) with its fido2-token tool, then systemd again with cryptsetup and
+# FIDO2 support, which the LFS build leaves out. That adds
+# systemd-cryptenroll, to enroll a key into a LUKS2 header, and
+# systemd-cryptsetup, which the initramfs uses to unlock with it. systemd
+# loads libcryptsetup and libfido2 at run time.
+#
+# The same build adds what the installer needs for the boot image:
+# systemd-stub and ukify, to combine the kernel and its command line into
+# one unified kernel image (UKI), and systemd-sbsign to sign it. Building
+# the stub needs pyelftools; ukify needs pefile.
 # The sources come from config/extra-sources.txt.
 (
   enter_src libcbor
@@ -25,7 +31,14 @@
   make
   make install
 )
-# The same options as the LFS build, plus the crypto features.
+for pkg in pyelftools pefile; do
+  (
+    enter_src "$pkg"
+    pip3 wheel -w dist --no-cache-dir --no-build-isolation --no-deps "$PWD"
+    pip3 install --no-index --find-links dist "$pkg"
+  )
+done
+# The same options as the LFS build, plus the crypto and boot features.
 enter_src systemd
 mkdir -p build
 cd build
@@ -45,7 +58,8 @@ meson setup ..                \
       -D dev-kvm-mode=0660    \
       -D nobody-group=nogroup \
       -D sysupdate=disabled   \
-      -D ukify=disabled       \
+      -D ukify=enabled        \
+      -D bootloader=enabled   \
       -D libcryptsetup=enabled \
       -D libcryptsetup-plugins=enabled \
       -D libfido2=enabled     \
@@ -53,3 +67,6 @@ meson setup ..                \
 ninja
 ninja install
 test -x /usr/bin/systemd-cryptenroll || die "systemd was built without cryptsetup support"
+test -f /usr/lib/systemd/boot/efi/linuxx64.efi.stub || die "systemd was built without systemd-stub"
+command -v ukify > /dev/null || die "systemd was built without ukify"
+command -v systemd-sbsign > /dev/null || die "systemd was built without systemd-sbsign"
