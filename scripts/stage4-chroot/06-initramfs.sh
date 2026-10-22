@@ -105,8 +105,12 @@ boot_installed() {
       echo "Unlocking $dev: insert your security key, or wait to type the passphrase." \
         > /dev/console
       wait_for_security_key
-      systemd-cryptsetup attach root "$dev" - fido2-device=auto,token-timeout=15s,tries=3 \
-        || rescue "cannot unlock $dev"
+      # The password prompt keeps its state under /run/systemd. The FIDO2
+      # support built into systemd-cryptsetup does not need the token
+      # plugin of libcryptsetup, which the initramfs leaves out.
+      mkdir -p /run/systemd/ask-password
+      SYSTEMD_CRYPTSETUP_USE_TOKEN_MODULE=0 systemd-cryptsetup attach root "$dev" - \
+        fido2-device=auto,token-timeout=15s,tries=3 || rescue "cannot unlock $dev"
     else
       # cryptsetup asks for the passphrase on the console, up to three times.
       cryptsetup open --type luks2 "$dev" root || rescue "cannot unlock $dev"
