@@ -13,3 +13,9 @@ https://sourceware.org/ftp/lvm2/LVM2.2.03.31.tgz 254131e28b22d55531d211886afbfdc
 https://www.kernel.org/pub/linux/utils/cryptsetup/v2.8/cryptsetup-2.8.8.tar.xz 3acfa685f2dd7fcc832e0b77bc7093aa7da554a51ce8dafbb4138eaa854eee35
 git+https://github.com/PJK/libcbor.git@v0.13.0 9826a4315116a588f7416912db9da6fcecd8da11
 https://developers.yubico.com/libfido2/Releases/libfido2-1.17.0.tar.gz c1012c8871d71b65872fd5ff1a9d6b0838a55683a03e85ba97479ce57129c736
+# dosfstools publishes no checksum; this is the SHA-256 of its GitHub release
+# asset. The Python packages use the SHA-256 that PyPI lists for the sdist.
+https://github.com/dosfstools/dosfstools/releases/download/v4.2/dosfstools-4.2.tar.gz 64926eebf90092dca21b14259a5301b7b98e7b1943e8a201c7d726084809b527
+https://files.pythonhosted.org/packages/a3/11/767522582afab1b884d277de0e6e011640cb9d7292a38694b4b1a1df1ae8/pyelftools-0.33.tar.gz 660d82dcbeb8e83d1702bd97f223f761625da06111c0cc988eac6b8ab0c1b61f
+https://files.pythonhosted.org/packages/03/4f/2750f7f6f025a1507cd3b7218691671eecfd0bbebebe8b39aa0fe1d360b8/pefile-2024.8.26.tar.gz 3ff6c5d8b43e8c37bb6e6dd5085658d658a7a0bdcd20b6a07b1fcfc1c4e9d632
+https://files.pythonhosted.org/packages/a6/bd/1436c50cc46699de0230fbaacc1d1de7bfec413176099949e9d5112e88f2/certifi-2026.10.19.tar.gz 035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae

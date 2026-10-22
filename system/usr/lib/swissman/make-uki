@@ -1,0 +1,39 @@
+#!/bin/bash
+# Build a signed unified kernel image (UKI): systemd-stub with the kernel
+# (which carries the initramfs) and the kernel command line, signed for
+# Secure Boot with this machine's own db key. The firmware starts it
+# directly, and because the command line is inside the signed image, it
+# cannot be changed at boot.
+#
+# Usage: make-uki <usr-dir> <key-dir> <cmdline> <output>
+# <usr-dir> is the /usr tree whose kernel, systemd-stub and os-release are
+# used (the running /usr, a new one staged by swissman-update, or the
+# target's during installation). <key-dir> holds db.key and db.crt.
+set -euo pipefail
+
+usr="$1" keys="$2" cmdline="$3" output="$4"
+
+kernels=("$usr"/lib/modules/*/vmlinuz)
+[ "${#kernels[@]}" -eq 1 ] && [ -f "${kernels[0]}" ] \
+  || { echo "make-uki: expected one kernel in $usr/lib/modules" >&2; exit 1; }
+kernel="${kernels[0]}"
+kver="$(basename "$(dirname "$kernel")")"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+sign() {
+  systemd-sbsign sign --private-key="$keys/db.key" --certificate="$keys/db.crt" \
+    --output="$2" "$1"
+}
+
+# The kernel inside is signed too, in case the stub hands it to the
+# firmware to start.
+sign "$kernel" "$work/vmlinuz"
+ukify build \
+  --linux="$work/vmlinuz" \
+  --uname="$kver" \
+  --cmdline="$cmdline" \
+  --os-release="@$usr/lib/os-release" \
+  --stub="$usr/lib/systemd/boot/efi/linuxx64.efi.stub" \
+  --output="$work/uki.efi" >&2
+sign "$work/uki.efi" "$output"

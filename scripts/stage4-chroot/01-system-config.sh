@@ -1,11 +1,13 @@
 # Basic system configuration (LFS chapter 9, systemd edition).
-cat > /etc/os-release << "EOF2"
+# os-release lives in /usr, so an update that replaces /usr brings its own.
+cat > /usr/lib/os-release << EOF2
 NAME="Swissman"
 ID=swissman
-PRETTY_NAME="Swissman Linux"
-VERSION_ID="0.1"
+PRETTY_NAME="Swissman Linux $SWISSMAN_VERSION"
+VERSION_ID="$SWISSMAN_VERSION"
 HOME_URL="https://github.com/4b57r4c7/Swissman"
 EOF2
+ln -sfv ../usr/lib/os-release /etc/os-release
 
 echo swissman > /etc/hostname
 echo "LANG=C.UTF-8" > /etc/locale.conf

@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -230,6 +231,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set the version
+        # A tag v1.2.3 builds version 1.2.3; everything else is "dev".
+        run: |
+          version=dev
+          [[ "$GITHUB_REF" = refs/tags/v* ]] && version="${GITHUB_REF_NAME#v}"
+          echo "SWISSMAN_VERSION=$version" >> "$GITHUB_ENV"
+
       - name: Restore ISO cache
         id: iso-cache
         uses: actions/cache@v4
@@ -239,7 +247,7 @@ jobs:
             out/swissman.efi
             out/swissman.sha256
             out/secureboot/
-          key: iso-${{ hashFiles('config/**', 'scripts/**') }}
+          key: iso-${{ env.SWISSMAN_VERSION }}-${{ hashFiles('config/**', 'scripts/**', 'system/**', 'tools/make-secureboot-keys.sh') }}
 
       - name: Download stage 3
         if: steps.iso-cache.outputs.cache-hit != 'true'
@@ -273,7 +281,7 @@ jobs:
 
       - name: Configure the system and build the kernel
         if: steps.iso-cache.outputs.cache-hit != 'true'
-        run: sudo scripts/chroot-build.sh scripts/stage4-chroot
+        run: sudo --preserve-env=SWISSMAN_VERSION scripts/chroot-build.sh scripts/stage4-chroot
 
       - name: Sign the kernel for Secure Boot
         if: steps.iso-cache.outputs.cache-hit != 'true'
@@ -300,7 +308,7 @@ jobs:
     name: Boot test in QEMU
     needs: iso
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -359,6 +367,29 @@ jobs:
           sudo chmod 666 "$hidraw"
           sudo tests/enroll-fido2.sh out/disk.img "$PASSPHRASE" "$hidraw"
           tests/qemu-boot.py fido2 out/swissman.efi out/disk.img "$LUKS_UUID" "$PASSPHRASE" "$hidraw"
+          echo "HIDRAW=$hidraw" >> "$GITHUB_ENV"
+
+      - name: Install, then boot, update and roll back with Secure Boot
+        run: |
+          rm -f out/disk.img
+          truncate -s 12G out/install.img
+          # A release signed by a test key, and the same one signed by a key
+          # the installed system does not trust.
+          keys="$RUNNER_TEMP/update-keys"
+          mkdir -p "$keys"
+          for name in test other; do
+            openssl genpkey -algorithm ed25519 -out "$keys/$name.key"
+            openssl pkey -in "$keys/$name.key" -pubout -out "$keys/$name.pem"
+          done
+          tools/make-release.sh out/swissman.iso 999.0.0 out/update/good
+          rm out/update/good/swissman.iso
+          tools/sign-release.sh out/update/good "$keys/test.key" "$keys/test.pem"
+          mkdir out/update/bad
+          ln out/update/good/{MANIFEST,swissman-rootfs.sfs} out/update/bad/
+          tools/sign-release.sh out/update/bad "$keys/other.key" "$keys/other.pem"
+          python3 -m http.server 8000 --bind 127.0.0.1 --directory out/update > /dev/null 2>&1 &
+          tests/qemu-boot.py install out/swissman.iso out/install.img "$HIDRAW" \
+            http://10.0.2.2:8000 "$keys/test.pem"
 
       - name: Upload boot logs
         if: always()
@@ -366,3 +397,54 @@ jobs:
         with:
           name: boot-logs
           path: out/boot-*.log
+
+  release:
+    name: Publish the release
+    needs: [iso, boot-test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the update signing key
+        run: |
+          [ -f config/update-signing.pem ] || {
+            echo "::error::Releases need config/update-signing.pem; see docs/updates.md"
+            exit 1
+          }
+
+      - name: Download ISO
+        uses: actions/download-artifact@v4
+        with:
+          name: swissman-iso
+          path: out
+
+      - name: Prepare the release files
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xorriso
+          tools/make-release.sh out/swissman.iso "${GITHUB_REF_NAME#v}" release
+
+      - name: Sign the manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          # Without the key in Secrets, the release stays a draft for the
+          # owner to sign on their own computer (docs/updates.md).
+          if [ -n "$UPDATE_SIGNING_KEY" ]; then
+            key="$RUNNER_TEMP/update.key"
+            ( umask 077; printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key" )
+            tools/sign-release.sh release "$key"
+            rm -f "$key"
+          fi
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          draft=--draft
+          [ -f release/MANIFEST.sig ] && draft=
+          gh release create "$GITHUB_REF_NAME" $draft --verify-tag \
+            --title "Swissman ${GITHUB_REF_NAME#v}" --generate-notes release/*

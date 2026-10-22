@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Enroll your own Secure Boot keys into the UEFI firmware.
+
+Usage: sb-enroll <key-dir> [--keep-db] [--auth-only]
+
+<key-dir> holds PK, KEK and db as .key and .crt files (made by
+make-secureboot-keys.sh). For each of db, KEK and PK, writes a signed
+update (<name>.auth) into <key-dir>: db signed with KEK, KEK with PK and
+PK with itself, as the UEFI specification requires for time-based
+authenticated variables. Firmware setup screens can import these files.
+
+Unless --auth-only is given, it then writes them to the firmware through
+efivarfs: db first, then KEK, then PK. Writing PK takes the firmware out
+of Setup Mode, and from the next boot it only starts EFI programs signed
+with the db key. The firmware must be in Setup Mode (its Secure Boot keys
+cleared in firmware setup); otherwise this exits with status 2 and
+changes nothing.
+
+--keep-db adds our db and KEK entries to the ones already in the firmware
+instead of replacing them, for machines that still need vendor-signed
+option ROMs or another operating system.
+
+Needs openssl.
+"""
+import argparse
+import os
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+EFIVARS = "/sys/firmware/efi/efivars"
+GLOBAL = uuid.UUID("8be4df61-93ca-11d2-aa0d-00e098032b8c")
+IMAGE_SECURITY = uuid.UUID("d719b2cb-3d3a-4596-a3bc-dad00e67656f")
+CERT_X509 = uuid.UUID("a5c059a1-94e4-4aa7-87b5-ab155c2bf072")
+CERT_PKCS7 = uuid.UUID("4aafd29d-68df-49ee-8aa9-347d375665a7")
+
+NON_VOLATILE, BOOT_ACCESS, RUNTIME_ACCESS = 0x1, 0x2, 0x4
+TIME_BASED_AUTH, APPEND_WRITE = 0x20, 0x40
+WIN_CERT_TYPE_EFI_GUID = 0x0EF1
+
+# Variable name, vendor GUID and the key that signs its updates.
+VARIABLES = [("db", IMAGE_SECURITY, "KEK"), ("KEK", GLOBAL, "PK"), ("PK", GLOBAL, "PK")]
+
+
+def read_var(name, guid):
+    try:
+        with open(f"{EFIVARS}/{name}-{guid}", "rb") as f:
+            return f.read()[4:]  # skip the attributes
+    except FileNotFoundError:
+        return None
+
+
+def signature_list(cert_der, owner):
+    """An EFI_SIGNATURE_LIST holding one X.509 certificate."""
+    data = owner.bytes_le + cert_der
+    return CERT_X509.bytes_le + struct.pack("<III", 28 + len(data), 0, len(data)) + data
+
+
+def efi_time():
+    t = time.gmtime()
+    # Year, month, day, hour, minute, second, pad, nanosecond, zone, daylight, pad.
+    return struct.pack("<HBBBBBBIhBB", t.tm_year, t.tm_mon, t.tm_mday,
+                       t.tm_hour, t.tm_min, t.tm_sec, 0, 0, 0, 0, 0)
+
+
+def authenticated_update(name, guid, attributes, payload, signer_key, signer_crt):
+    """EFI_VARIABLE_AUTHENTICATION_2 header followed by the payload."""
+    timestamp = efi_time()
+    signed = (name.encode("utf-16-le") + guid.bytes_le + struct.pack("<I", attributes)
+              + timestamp + payload)
+    with tempfile.TemporaryDirectory() as tmp:
+        data = os.path.join(tmp, "data")
+        with open(data, "wb") as f:
+            f.write(signed)
+        p7 = subprocess.run(
+            ["openssl", "smime", "-sign", "-binary", "-noattr", "-md", "sha256",
+             "-outform", "DER", "-in", data, "-signer", signer_crt, "-inkey", signer_key],
+            check=True, stdout=subprocess.PIPE).stdout
+    cert = struct.pack("<IHH", 24 + len(p7), 0x0200, WIN_CERT_TYPE_EFI_GUID) + CERT_PKCS7.bytes_le + p7
+    return timestamp + cert + payload
+
+
+def write_var(name, guid, attributes, data):
+    path = f"{EFIVARS}/{name}-{guid}"
+    if os.path.exists(path):
+        # efivarfs marks existing variables immutable.
+        subprocess.run(["chattr", "-i", path], check=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        # efivarfs takes the whole update in a single write.
+        os.write(fd, struct.pack("<I", attributes) + data)
+    finally:
+        os.close(fd)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("keydir")
+    parser.add_argument("--keep-db", action="store_true")
+    parser.add_argument("--auth-only", action="store_true")
+    opts = parser.parse_args()
+    keydir = opts.keydir
+
+    if not opts.auth_only:
+        if not os.path.isdir(EFIVARS):
+            sys.exit("sb-enroll: not booted with UEFI (no efivarfs)")
+        setup_mode = read_var("SetupMode", GLOBAL)
+        if not setup_mode or setup_mode[-1] != 1:
+            print("sb-enroll: the firmware is not in Setup Mode; clear its Secure Boot "
+                  "keys in firmware setup first", file=sys.stderr)
+            sys.exit(2)
+
+    owner_file = os.path.join(keydir, "owner-guid")
+    if not os.path.exists(owner_file):
+        with open(owner_file, "w") as f:
+            f.write(f"{uuid.uuid4()}\n")
+    with open(owner_file) as f:
+        owner = uuid.UUID(f.read().strip())
+
+    updates = []
+    for name, guid, signer in VARIABLES:
+        der = subprocess.run(["openssl", "x509", "-in", os.path.join(keydir, f"{name}.crt"),
+                              "-outform", "DER"], check=True, stdout=subprocess.PIPE).stdout
+        attributes = NON_VOLATILE | BOOT_ACCESS | RUNTIME_ACCESS | TIME_BASED_AUTH
+        if opts.keep_db and name != "PK":
+            attributes |= APPEND_WRITE
+        data = authenticated_update(name, guid, attributes, signature_list(der, owner),
+                                    os.path.join(keydir, f"{signer}.key"),
+                                    os.path.join(keydir, f"{signer}.crt"))
+        with open(os.path.join(keydir, f"{name}.auth"), "wb") as f:
+            f.write(data)
+        updates.append((name, guid, attributes, data))
+
+    if opts.auth_only:
+        return
+    for name, guid, attributes, data in updates:
+        write_var(name, guid, attributes, data)
+        print(f"sb-enroll: enrolled {name}")
+
+
+if __name__ == "__main__":
+    main()

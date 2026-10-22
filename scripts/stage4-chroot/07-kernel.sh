@@ -28,3 +28,7 @@ kver="$(make -s kernelrelease)"
 install -v -m644 arch/x86/boot/bzImage "/boot/vmlinuz-$kver.efi"
 install -v -m644 .config "/boot/config-$kver"
 ln -sfv "vmlinuz-$kver.efi" /boot/vmlinuz.efi
+# The installer and swissman-update build the signed boot image from the
+# kernel that belongs to the /usr they install, so it lives next to its
+# modules.
+install -v -m644 arch/x86/boot/bzImage "/usr/lib/modules/$kver/vmlinuz"

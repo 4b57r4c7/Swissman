@@ -1,0 +1,235 @@
+#!/bin/bash
+# Install Swissman from the live system onto a disk.
+#
+# Usage: swissman-install [--disk <device>] [--hostname <name>] [--user <name>]
+#                         [--fido2 pin|uv|presence|no] [--keep-vendor-keys] [--yes]
+#
+# The disk is wiped and gets two GPT partitions: a 512 MiB EFI system
+# partition and a root partition encrypted with LUKS2. The installer
+#  - copies the live root file system onto the encrypted partition,
+#  - sets the root password and creates a user,
+#  - generates this machine's own Secure Boot keys (they never leave it),
+#  - builds a unified kernel image signed with them and puts it on the
+#    EFI partition,
+#  - enrolls the keys in the firmware if it is in Setup Mode,
+#  - optionally enrolls a FIDO2 security key to unlock the disk.
+#
+# Anything not given as an option is asked for. Secrets are always asked
+# for on the terminal, unless they are set in the environment
+# (SWISSMAN_DISK_PASSPHRASE, SWISSMAN_ROOT_PASSWORD, SWISSMAN_USER_PASSWORD),
+# which is meant for automated tests.
+#
+# --fido2 enrolls a security key: "pin" asks for its PIN and a touch, "uv"
+# for a fingerprint (or PIN) checked by the key, "presence" only for a
+# touch. --keep-vendor-keys adds our Secure Boot keys next to the ones
+# already in the firmware instead of replacing them.
+set -euo pipefail
+
+LIB=/usr/lib/swissman
+TARGET=/mnt/swissman-target
+MAPPER=swissman-root
+ESP_SIZE=512M
+# GPT partition types: EFI system partition and Linux root (x86-64).
+ESP_TYPE=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+ROOT_TYPE=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709
+
+disk= hostname= user= fido2= keep_vendor_keys= assume_yes=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --disk) disk="$2"; shift 2 ;;
+    --hostname) hostname="$2"; shift 2 ;;
+    --user) user="$2"; shift 2 ;;
+    --fido2) fido2="$2"; shift 2 ;;
+    --keep-vendor-keys) keep_vendor_keys=1; shift ;;
+    --yes) assume_yes=1; shift ;;
+    -h|--help) sed -n '2,/^set -/{/^set -/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
+    *) echo "swissman-install: unknown option $1" >&2; exit 1 ;;
+  esac
+done
+
+say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+die() { printf '\nswissman-install: %s\n' "$*" >&2; exit 1; }
+
+ask() {  # ask <variable> <prompt> [default]
+  local answer
+  read -r -p "$2${3:+ [$3]}: " answer
+  printf -v "$1" '%s' "${answer:-${3:-}}"
+}
+
+yes_no() {  # yes_no <prompt>; default no
+  local answer
+  read -r -p "$1 [y/N]: " answer
+  [[ "$answer" = [yY]* ]]
+}
+
+# Read a secret twice from the terminal into a variable, unless the
+# environment variable of the same name is already set.
+ask_secret() {  # ask_secret <variable> <prompt> <minimum length>
+  local first second
+  if [ -n "${!1:-}" ]; then
+    return
+  fi
+  while :; do
+    read -r -s -p "$2: " first; echo
+    read -r -s -p "Repeat it: " second; echo
+    if [ "$first" != "$second" ]; then
+      echo "They do not match, try again."
+    elif [ "${#first}" -lt "$3" ]; then
+      echo "Use at least $3 characters."
+    else
+      break
+    fi
+  done
+  printf -v "$1" '%s' "$first"
+}
+
+cleanup() {
+  set +e
+  for m in "$TARGET/efi" "$TARGET"; do
+    mountpoint -q "$m" && umount "$m"
+  done
+  [ -e "/dev/mapper/$MAPPER" ] && cryptsetup close "$MAPPER"
+}
+trap cleanup EXIT
+
+[ "$(id -u)" -eq 0 ] || die "run me as root"
+[ -d /run/live/lower ] || die "run me from the Swissman live system"
+[ -d /sys/firmware/efi ] || die "the machine was not started with UEFI; Swissman needs UEFI"
+
+# --- Questions -------------------------------------------------------------
+
+if [ -z "$disk" ]; then
+  say "Disks"
+  lsblk -dpo NAME,SIZE,MODEL,TRAN -e 7,11
+  ask disk "Disk to install to (everything on it is erased)"
+fi
+[ -b "$disk" ] && [ "$(lsblk -dno TYPE "$disk")" = disk ] || die "$disk is not a disk"
+live_medium="$(findmnt -no SOURCE /run/live/medium)"
+live_disk="$(lsblk -ndpo PKNAME "$live_medium")"
+[ "$(realpath "${live_disk:-$live_medium}")" != "$(realpath "$disk")" ] || die "$disk holds the live system"
+
+[ -n "$hostname" ] || ask hostname "Computer name" swissman
+[[ "$hostname" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,62})$ ]] || die "invalid computer name: $hostname"
+[ -n "$user" ] || ask user "Your user name"
+[[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && [ "$user" != root ] || die "invalid user name: $user"
+
+echo
+echo "The disk is encrypted. You type this passphrase every time the computer"
+echo "starts (unless a security key unlocks it). Losing it means losing the data."
+ask_secret SWISSMAN_DISK_PASSPHRASE "Disk passphrase" 8
+ask_secret SWISSMAN_ROOT_PASSWORD "Password for root" 8
+ask_secret SWISSMAN_USER_PASSWORD "Password for $user" 8
+
+if [ -z "$fido2" ]; then
+  fido2=no
+  if fido2-token -L 2>/dev/null | grep -q .; then
+    echo
+    echo "A FIDO2 security key is plugged in."
+    if yes_no "Use it to unlock the disk (the passphrase keeps working)?"; then
+      if yes_no "Does the key check your fingerprint?"; then fido2=uv; else fido2=pin; fi
+    fi
+  fi
+fi
+case "$fido2" in pin|uv|presence|no) ;; *) die "--fido2 takes pin, uv, presence or no" ;; esac
+
+if [ -z "$assume_yes" ]; then
+  echo
+  lsblk -po NAME,SIZE,TYPE,FSTYPE,LABEL "$disk"
+  echo
+  echo "ALL DATA ON $disk WILL BE ERASED."
+  read -r -p "Type the disk name ($disk) to continue: " answer
+  [ "$answer" = "$disk" ] || die "cancelled"
+fi
+
+# --- Disk ------------------------------------------------------------------
+
+say "Partitioning $disk"
+wipefs -q -a "$disk"
+sfdisk -q --wipe always "$disk" << EOF2
+label: gpt
+size=$ESP_SIZE, type=$ESP_TYPE, name="EFI system"
+type=$ROOT_TYPE, name="Swissman root"
+EOF2
+udevadm settle
+mapfile -t parts < <(lsblk -lnpo NAME,TYPE "$disk" | awk '$2 == "part" { print $1 }')
+[ "${#parts[@]}" -eq 2 ] || die "expected two partitions on $disk"
+esp="${parts[0]}" root="${parts[1]}"
+
+say "Encrypting $root (LUKS2, Argon2id)"
+printf '%s' "$SWISSMAN_DISK_PASSPHRASE" | cryptsetup luksFormat -q --type luks2 \
+  --pbkdf argon2id --label swissman-root --key-file - "$root"
+printf '%s' "$SWISSMAN_DISK_PASSPHRASE" | cryptsetup open --key-file - "$root" "$MAPPER"
+luks_uuid="$(cryptsetup luksUUID "$root")"
+
+say "Creating file systems"
+mkfs.vfat -F 32 -n SWISSEFI "$esp" > /dev/null
+mkfs.ext4 -q -L swissman "/dev/mapper/$MAPPER"
+mkdir -p "$TARGET"
+mount "/dev/mapper/$MAPPER" "$TARGET"
+
+say "Copying the system (this takes a few minutes)"
+cp -a /run/live/lower/. "$TARGET/"
+mkdir -p "$TARGET/efi"
+mount -o umask=0077 "$esp" "$TARGET/efi"
+
+# --- Configuration ---------------------------------------------------------
+
+say "Configuring the system"
+echo "$hostname" > "$TARGET/etc/hostname"
+cat >> "$TARGET/etc/fstab" << EOF2
+UUID=$(blkid -s UUID -o value "$esp")  /efi  vfat  umask=0077,noauto,x-systemd.automount  0  0
+EOF2
+mkdir -p "$TARGET/etc/swissman" "$TARGET/var/lib/swissman"
+echo "swissman.root=UUID=$luks_uuid" > "$TARGET/etc/swissman/cmdline"
+( . "$TARGET/usr/lib/os-release"; echo "$VERSION_ID" ) > "$TARGET/var/lib/swissman/version"
+
+chroot "$TARGET" useradd -m -s /bin/bash "$user"
+printf 'root:%s\n%s:%s\n' "$SWISSMAN_ROOT_PASSWORD" "$user" "$SWISSMAN_USER_PASSWORD" \
+  | chroot "$TARGET" chpasswd
+
+# --- Secure Boot -----------------------------------------------------------
+
+keys="$TARGET/etc/swissman/secureboot"
+say "Generating this computer's Secure Boot keys"
+"$LIB/make-secureboot-keys.sh" "$keys" "Swissman $hostname" 2> /dev/null
+chmod 700 "$keys"
+
+say "Building the signed kernel image"
+mkdir -p "$TARGET/efi/EFI/BOOT" "$TARGET/efi/EFI/Linux"
+"$LIB/make-uki" "$TARGET/usr" "$keys" "$(cat "$TARGET/etc/swissman/cmdline")" \
+  "$TARGET/efi/EFI/Linux/swissman.efi"
+cp "$TARGET/efi/EFI/Linux/swissman.efi" "$TARGET/efi/EFI/BOOT/BOOTX64.EFI"
+
+say "Enrolling the Secure Boot keys"
+# Firmware setup screens can import these files by hand.
+"$LIB/sb-enroll" "$keys" --auth-only ${keep_vendor_keys:+--keep-db}
+mkdir -p "$TARGET/efi/keys"
+cp "$keys"/{PK,KEK,db}.{cer,auth} "$TARGET/efi/keys/"
+sb_status=0
+"$LIB/sb-enroll" "$keys" ${keep_vendor_keys:+--keep-db} || sb_status=$?
+case "$sb_status" in
+  0) sb_message="Secure Boot keys enrolled; Secure Boot is on from the next start." ;;
+  2) sb_message="The firmware was not in Setup Mode, so the keys were NOT enrolled.
+   In firmware setup, clear the Secure Boot keys, then enroll db, KEK and PK
+   from the keys folder of the EFI partition (or start Swissman and run
+   /usr/lib/swissman/sb-enroll /etc/swissman/secureboot as root)." ;;
+  *) die "enrolling the Secure Boot keys failed" ;;
+esac
+
+# --- Security key ----------------------------------------------------------
+
+if [ "$fido2" != no ]; then
+  say "Enrolling the security key (touch it when it blinks)"
+  case "$fido2" in
+    pin) opts=(--fido2-with-client-pin=yes --fido2-with-user-presence=yes) ;;
+    uv) opts=(--fido2-with-client-pin=no --fido2-with-user-verification=yes) ;;
+    presence) opts=(--fido2-with-client-pin=no --fido2-with-user-presence=yes) ;;
+  esac
+  PASSWORD="$SWISSMAN_DISK_PASSPHRASE" systemd-cryptenroll --fido2-device=auto "${opts[@]}" "$root"
+fi
+
+sync
+say "Installation complete"
+echo "Disk: $disk (root partition $root, LUKS UUID $luks_uuid)"
+echo "$sb_message"
+echo "Remove the installation medium and restart the computer."
