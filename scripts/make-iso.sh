@@ -6,8 +6,18 @@
 . "$(dirname "$0")/lib.sh"
 
 [ "$(id -u)" -eq 0 ] || die "make-iso.sh must run as root"
-kernel="$LFS/boot/vmlinuz.efi"
-[ -f "$kernel" ] || die "kernel not found at $kernel"
+# vmlinuz.efi is a symlink to the versioned image; size and copy the real file.
+kernel="$(readlink -f "$LFS/boot/vmlinuz.efi")"
+[ -f "$kernel" ] || die "kernel not found at $LFS/boot/vmlinuz.efi"
+
+# Files installed by the unprivileged build user in stages 1 and 2 (the
+# top-level directory and the /bin, /lib and /sbin symlinks) still carry
+# that user's ID. Nothing on the system should belong to it.
+build_uid="$(stat -c %u "$REPO_ROOT")"
+build_gid="$(stat -c %g "$REPO_ROOT")"
+if [ "$build_uid" -ne 0 ]; then
+  find "$LFS" -xdev \( -uid "$build_uid" -o -gid "$build_gid" \) -exec chown -h root:root {} +
+fi
 
 iso_tree="$WORK/iso"
 out="$REPO_ROOT/out"
@@ -20,7 +30,8 @@ mksquashfs "$LFS" "$iso_tree/live/rootfs.sfs" -noappend -comp zstd -Xcompression
 
 log "Creating the EFI system partition image"
 esp="$WORK/efiboot.img"
-size_kib=$(( ($(stat -c %s "$kernel") / 1024) + 4096 ))
+# Room for the kernel plus FAT overhead.
+size_kib=$(( $(stat -c %s "$kernel") / 1024 * 11 / 10 + 2048 ))
 rm -f "$esp"
 truncate -s "${size_kib}K" "$esp"
 mkfs.vfat -n SWISSEFI "$esp"
