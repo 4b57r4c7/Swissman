@@ -17,6 +17,8 @@
 )
 
 cp -rv --preserve=mode "$REPO_ROOT/system/." /
+# Set the modes here too: the ISO cache key hashes file contents, not modes.
+chmod -v 755 /usr/bin/swissman-install /usr/bin/swissman-update /usr/lib/swissman/*
 install -v -m755 "$REPO_ROOT/tools/make-secureboot-keys.sh" /usr/lib/swissman/
 
 # Releases are signed with this key (see docs/updates.md). Without it, the

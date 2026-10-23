@@ -39,6 +39,8 @@ for pkg in pyelftools pefile; do
   )
 done
 # The same options as the LFS build, plus the crypto and boot features.
+# meson cannot work out the SBAT entry for systemd-stub in the chroot, so
+# it is given here.
 enter_src systemd
 mkdir -p build
 cd build
@@ -60,6 +62,11 @@ meson setup ..                \
       -D sysupdate=disabled   \
       -D ukify=enabled        \
       -D bootloader=enabled   \
+      -D sbat-distro=swissman \
+      -D sbat-distro-summary=Swissman \
+      -D sbat-distro-pkgname=systemd \
+      -D sbat-distro-version=261.2 \
+      -D sbat-distro-url=https://github.com/4b57r4c7/Swissman \
       -D libcryptsetup=enabled \
       -D libcryptsetup-plugins=enabled \
       -D libfido2=enabled     \
@@ -69,4 +76,8 @@ ninja install
 test -x /usr/bin/systemd-cryptenroll || die "systemd was built without cryptsetup support"
 test -f /usr/lib/systemd/boot/efi/linuxx64.efi.stub || die "systemd was built without systemd-stub"
 command -v ukify > /dev/null || die "systemd was built without ukify"
-command -v systemd-sbsign > /dev/null || die "systemd was built without systemd-sbsign"
+# systemd installs systemd-sbsign either in /usr/bin or with its helpers.
+[ -x /usr/bin/systemd-sbsign ] || [ -x /usr/lib/systemd/systemd-sbsign ] || {
+  find /usr -name '*sbsign*'
+  die "systemd was built without systemd-sbsign"
+}
