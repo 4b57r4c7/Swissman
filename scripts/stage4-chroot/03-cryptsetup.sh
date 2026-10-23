@@ -36,7 +36,8 @@
   ./configure --prefix=/usr --enable-pkgconfig --enable-udev_sync \
     --enable-udev_rules --with-udevdir=/usr/lib/udev/rules.d
   make device-mapper
-  make install_device-mapper
+  # The install target relinks dmsetup and races with itself in parallel.
+  make -j1 install_device-mapper
 )
 enter_src cryptsetup
 ./configure --prefix=/usr --disable-static --disable-asciidoc --disable-ssh-token
