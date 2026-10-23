@@ -299,7 +299,7 @@ def test_install(iso, disk, hidraw, update_url, update_key, timeout):
         vm.forget()
         vm.send(f"SWISSMAN_DISK_PASSPHRASE={passphrase} SWISSMAN_ROOT_PASSWORD={root_pw} "
                 f"SWISSMAN_USER_PASSWORD={user_pw} swissman-install --disk /dev/vda "
-                "--hostname testbox --user tester --fido2 presence --yes; "
+                "--hostname testbox --user tester --fido2 presence --serial-console --yes; "
                 "echo INSTALL-'EXIT'-$?")
         error = vm.wait_for(lambda s: re.search(rb"INSTALL-EXIT-[0-9]", s), timeout)
         if error:

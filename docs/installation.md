@@ -98,4 +98,7 @@ swissman-install
 swissman-install --disk /dev/vda --hostname testbox --user tester --fido2 no --yes
 ```
 
+На компютър без екран добави `--serial-console`, за да пита за паролата на
+диска през серийния порт.
+
 `swissman-install --help` показва всички опции.

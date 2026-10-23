@@ -2,7 +2,8 @@
 # Install Swissman from the live system onto a disk.
 #
 # Usage: swissman-install [--disk <device>] [--hostname <name>] [--user <name>]
-#                         [--fido2 pin|uv|presence|no] [--keep-vendor-keys] [--yes]
+#                         [--fido2 pin|uv|presence|no] [--keep-vendor-keys]
+#                         [--serial-console] [--yes]
 #
 # The disk is wiped and gets two GPT partitions: a 512 MiB EFI system
 # partition and a root partition encrypted with LUKS2. The installer
@@ -22,7 +23,9 @@
 # --fido2 enrolls a security key: "pin" asks for its PIN and a touch, "uv"
 # for a fingerprint (or PIN) checked by the key, "presence" only for a
 # touch. --keep-vendor-keys adds our Secure Boot keys next to the ones
-# already in the firmware instead of replacing them.
+# already in the firmware instead of replacing them. --serial-console asks
+# for the disk passphrase on the first serial port instead of the screen,
+# for machines without one.
 set -euo pipefail
 
 LIB=/usr/lib/swissman
@@ -33,7 +36,7 @@ ESP_SIZE=512M
 ESP_TYPE=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
 ROOT_TYPE=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709
 
-disk= hostname= user= fido2= keep_vendor_keys= assume_yes=
+disk= hostname= user= fido2= keep_vendor_keys= serial_console= assume_yes=
 while [ $# -gt 0 ]; do
   case "$1" in
     --disk) disk="$2"; shift 2 ;;
@@ -41,6 +44,7 @@ while [ $# -gt 0 ]; do
     --user) user="$2"; shift 2 ;;
     --fido2) fido2="$2"; shift 2 ;;
     --keep-vendor-keys) keep_vendor_keys=1; shift ;;
+    --serial-console) serial_console=1; shift ;;
     --yes) assume_yes=1; shift ;;
     -h|--help) sed -n '2,/^set -/{/^set -/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
     *) echo "swissman-install: unknown option $1" >&2; exit 1 ;;
@@ -180,7 +184,15 @@ cat >> "$TARGET/etc/fstab" << EOF2
 UUID=$(blkid -s UUID -o value "$esp")  /efi  vfat  umask=0077,noauto,x-systemd.automount  0  0
 EOF2
 mkdir -p "$TARGET/etc/swissman" "$TARGET/var/lib/swissman"
-echo "swissman.root=UUID=$luks_uuid" > "$TARGET/etc/swissman/cmdline"
+# The last console= becomes /dev/console, where the initramfs asks for the
+# disk passphrase: the screen, or the first serial port on a machine
+# without one. Naming consoles also stops systemd-stub from adding its own.
+if [ -n "$serial_console" ]; then
+  consoles="console=tty0 console=ttyS0,115200"
+else
+  consoles="console=ttyS0,115200 console=tty0"
+fi
+echo "swissman.root=UUID=$luks_uuid $consoles" > "$TARGET/etc/swissman/cmdline"
 ( . "$TARGET/usr/lib/os-release"; echo "$VERSION_ID" ) > "$TARGET/var/lib/swissman/version"
 
 chroot "$TARGET" useradd -m -s /bin/bash "$user"
