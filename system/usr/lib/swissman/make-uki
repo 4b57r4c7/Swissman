@@ -21,8 +21,9 @@ kver="$(basename "$(dirname "$kernel")")"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
+sbsign="$(command -v systemd-sbsign || echo /usr/lib/systemd/systemd-sbsign)"
 sign() {
-  systemd-sbsign sign --private-key="$keys/db.key" --certificate="$keys/db.crt" \
+  "$sbsign" sign --private-key="$keys/db.key" --certificate="$keys/db.crt" \
     --output="$2" "$1"
 }
 

@@ -76,4 +76,8 @@ ninja install
 test -x /usr/bin/systemd-cryptenroll || die "systemd was built without cryptsetup support"
 test -f /usr/lib/systemd/boot/efi/linuxx64.efi.stub || die "systemd was built without systemd-stub"
 command -v ukify > /dev/null || die "systemd was built without ukify"
-command -v systemd-sbsign > /dev/null || die "systemd was built without systemd-sbsign"
+# systemd installs systemd-sbsign either in /usr/bin or with its helpers.
+[ -x /usr/bin/systemd-sbsign ] || [ -x /usr/lib/systemd/systemd-sbsign ] || {
+  find /usr -name '*sbsign*'
+  die "systemd was built without systemd-sbsign"
+}
