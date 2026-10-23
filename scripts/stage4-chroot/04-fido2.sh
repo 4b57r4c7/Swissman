@@ -39,6 +39,8 @@ for pkg in pyelftools pefile; do
   )
 done
 # The same options as the LFS build, plus the crypto and boot features.
+# meson cannot work out the SBAT entry for systemd-stub in the chroot, so
+# it is given here.
 enter_src systemd
 mkdir -p build
 cd build
@@ -60,6 +62,11 @@ meson setup ..                \
       -D sysupdate=disabled   \
       -D ukify=enabled        \
       -D bootloader=enabled   \
+      -D sbat-distro=swissman \
+      -D sbat-distro-summary=Swissman \
+      -D sbat-distro-pkgname=systemd \
+      -D sbat-distro-version=261.2 \
+      -D sbat-distro-url=https://github.com/4b57r4c7/Swissman \
       -D libcryptsetup=enabled \
       -D libcryptsetup-plugins=enabled \
       -D libfido2=enabled     \
